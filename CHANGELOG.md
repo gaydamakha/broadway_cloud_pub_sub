@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The streaming producer's unary RPC client no longer crashes when its gRPC
+  connection process stops during an `Acknowledge` or `ModifyAckDeadline` call,
+  for example when the connection closes while the request waits for it. The
+  call now fails as a retryable error: the ack ids are kept for the next flush
+  and the channel reconnects.
+
 - Unary acknowledgements and ack deadline modifications now fetch a fresh token
   on every call instead of using the token from when the channel was opened, so
   a long-lived channel no longer fails with `UNAUTHENTICATED` after the token

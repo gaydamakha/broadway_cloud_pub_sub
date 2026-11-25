@@ -686,4 +686,106 @@ defmodule BroadwayCloudPubSub.Streaming.UnaryRpcClientTest do
       Process.flag(:trap_exit, false)
     end
   end
+
+  # ============================================================
+  # Connection process stops during the RPC
+  #
+  # The Mint adapter's connection process stops with :normal when its
+  # connection closes. A request that waits in its mailbox at that moment
+  # makes the adapter's GenServer.call exit instead of returning an error.
+  # ============================================================
+
+  # The connection process of this fake stops with :normal when it receives
+  # its first call, so every RPC sent on the channel exits.
+  defmodule StoppingConnGrpcClient do
+    @moduledoc false
+    @behaviour BroadwayCloudPubSub.Streaming.Client
+
+    @impl true
+    def init(opts), do: {:ok, Map.new(opts)}
+
+    @impl true
+    def connect(%{test_pid: test_pid}) do
+      conn_pid =
+        spawn_link(fn ->
+          receive do
+            {:"$gen_call", _from, _request} -> exit(:normal)
+          end
+        end)
+
+      send(test_pid, {:fake_grpc, :connect, conn_pid})
+      {:ok, %{adapter_payload: %{conn_pid: conn_pid}}}
+    end
+
+    @impl true
+    def disconnect(%{adapter_payload: %{conn_pid: conn_pid}}, _config) do
+      if Process.alive?(conn_pid), do: Process.exit(conn_pid, :kill)
+      :ok
+    end
+
+    @impl true
+    def connection_pid(%{adapter_payload: %{conn_pid: pid}}) when is_pid(pid), do: pid
+    def connection_pid(_), do: nil
+
+    @impl true
+    def streaming_pull(_channel, _config), do: {:error, :not_implemented}
+    @impl true
+    def send_request(_stream, _request, _config), do: {:ok, nil}
+    @impl true
+    def recv(_stream, _config), do: {:error, :not_implemented}
+    @impl true
+    def close_send(_stream, _config), do: :ok
+    @impl true
+    def cancel(_stream, _config), do: :ok
+
+    @impl true
+    def acknowledge(channel, _request, _config), do: request(channel)
+
+    @impl true
+    def modify_ack_deadline(channel, _request, _config), do: request(channel)
+
+    defp request(%{adapter_payload: %{conn_pid: conn_pid}}) do
+      GenServer.call(conn_pid, :request, 5_000)
+    end
+  end
+
+  defp start_client_with_stopping_conn do
+    opts = [
+      broadway_name: __MODULE__,
+      subscription: "projects/test/subscriptions/test-sub",
+      grpc_client: StoppingConnGrpcClient,
+      grpc_client_config: %{test_pid: self()},
+      backoff_type: :exp,
+      backoff_min: 50,
+      backoff_max: 1_000
+    ]
+
+    {:ok, pid} = UnaryRpcClient.start_link(opts)
+    pid
+  end
+
+  describe "connection process stops during the RPC" do
+    test "acknowledge/2 retains the ack_ids and reconnects" do
+      pid = start_client_with_stopping_conn()
+      assert_receive {:fake_grpc, :connect, first_conn_pid}
+
+      assert {:ok, ["ack-1"]} = UnaryRpcClient.acknowledge(pid, ["ack-1"])
+
+      assert_receive {:fake_grpc, :connect, second_conn_pid}
+      assert second_conn_pid != first_conn_pid
+      assert Process.alive?(pid)
+    end
+
+    test "modify_ack_deadline/3 retains the ack_ids and reconnects" do
+      pid = start_client_with_stopping_conn()
+      assert_receive {:fake_grpc, :connect, first_conn_pid}
+
+      assert {:ok, ["ack-1", "ack-2"]} =
+               UnaryRpcClient.modify_ack_deadline(pid, ["ack-1", "ack-2"], 10)
+
+      assert_receive {:fake_grpc, :connect, second_conn_pid}
+      assert second_conn_pid != first_conn_pid
+      assert Process.alive?(pid)
+    end
+  end
 end

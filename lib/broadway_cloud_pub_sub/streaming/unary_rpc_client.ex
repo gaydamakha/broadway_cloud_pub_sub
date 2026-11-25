@@ -286,7 +286,7 @@ defmodule BroadwayCloudPubSub.Streaming.UnaryRpcClient do
         {:reply, {:error, :no_channel}, state}
 
       channel ->
-        case rpc_fn.(channel, request, state.grpc_client_config) do
+        case call_rpc(rpc_fn, channel, request, state.grpc_client_config) do
           {:ok, _} ->
             {:reply, :ok, state}
 
@@ -294,6 +294,16 @@ defmodule BroadwayCloudPubSub.Streaming.UnaryRpcClient do
             handle_rpc_error(state, ack_ids, error, operation)
         end
     end
+  end
+
+  # The adapter exits instead of returning an error when its connection
+  # process stops or does not answer during the call, for example when the
+  # connection closes while the request waits in that process's mailbox.
+  # This is a transport failure, so it takes the retryable path.
+  defp call_rpc(rpc_fn, channel, request, grpc_client_config) do
+    rpc_fn.(channel, request, grpc_client_config)
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp handle_rpc_error(state, ack_ids, error, operation) do
